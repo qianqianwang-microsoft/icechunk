@@ -175,9 +175,9 @@ impl AzureBlobStorage {
         byte_range: &ByteRange,
     ) -> StorageResult<Bytes> {
         let blob_client = self.get_blob_client(key);
-        Ok(get_object_range(&blob_client, byte_range)
+        get_object_range(&blob_client, byte_range)
             .await
-            .map_err(StorageError::from)?)
+            .map_err(StorageError::from)
     }
 
     async fn put_object(&self, key: &str, bytes: Vec<u8>) -> StorageResult<()> {
@@ -390,10 +390,8 @@ impl Storage for AzureBlobStorage {
     ) -> StorageResult<()> {
         let key = self.ref_key(ref_key)?;
         let blob_client = self.get_blob_client(key.as_str());
-        if !overwrite_refs {
-            if blob_client.exists().await? {
-                return Err(StorageError::RefAlreadyExists(key));
-            }
+        if !overwrite_refs && blob_client.exists().await? {
+            return Err(StorageError::RefAlreadyExists(key));
         }
         let body: azure_core::Body = bytes.into();
         blob_client.put_block_blob(body).await?;
@@ -460,7 +458,7 @@ fn object_to_list_info(object: &BlobItem) -> Option<ListInfo<String>> {
         BlobItem::BlobPrefix(_) => None,
     };
     let last_modified = match object {
-        BlobItem::Blob(blob) => Some(blob.properties.last_modified.clone()),
+        BlobItem::Blob(blob) => Some(blob.properties.last_modified),
         BlobItem::BlobPrefix(_) => None,
     };
 
