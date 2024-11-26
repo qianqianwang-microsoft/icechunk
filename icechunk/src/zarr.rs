@@ -35,9 +35,9 @@ use crate::{
         UserAttributes, ZarrArrayMetadata,
     },
     storage::{
+        azure_blob::{AzureBlobConfig, AzureBlobStorage},
         s3::{S3Config, S3Storage},
         virtual_ref::ObjectStoreVirtualChunkResolverConfig,
-        azure_blob::{AzureBlobConfig, AzureBlobStorage},
     },
     ObjectStorage, Repository, RepositoryBuilder, SnapshotMetadata, Storage,
 };
@@ -88,10 +88,11 @@ impl StorageConfig {
                     .map_err(|e| format!("Error creating storage: {e}"))?;
                 Ok(Arc::new(storage))
             }
-            StorageConfig::AzureBlobStore { container, prefix, config }  => {
-                let storage = AzureBlobStorage::new_azure_blob_store(container, prefix, config)
-                    .await
-                    .map_err(|e| format!("Error creating storage: {e}"))?;
+            StorageConfig::AzureBlobStore { container, prefix, config } => {
+                let storage =
+                    AzureBlobStorage::new_azure_blob_store(container, prefix, config)
+                        .await
+                        .map_err(|e| format!("Error creating storage: {e}"))?;
                 Ok(Arc::new(storage))
             }
         }

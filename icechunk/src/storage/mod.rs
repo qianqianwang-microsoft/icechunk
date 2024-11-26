@@ -21,10 +21,10 @@ pub mod caching;
 #[cfg(test)]
 pub mod logging;
 
+pub mod azure_blob;
 pub mod object_store;
 pub mod s3;
 pub mod virtual_ref;
-pub mod azure_blob;
 
 pub use caching::MemCachingStorage;
 pub use object_store::ObjectStorage;

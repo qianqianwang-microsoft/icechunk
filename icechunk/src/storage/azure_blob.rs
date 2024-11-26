@@ -7,25 +7,29 @@ use std::{
     },
 };
 
-
 use async_stream::try_stream;
 use async_trait::async_trait;
 use azure_core::prelude::Range;
 use azure_storage::{prelude::*, CloudLocation};
-use azure_storage_blobs::{ container::operations::BlobItem, prelude::*};
+use azure_storage_blobs::{container::operations::BlobItem, prelude::*};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use time::format_description::well_known::Rfc3339;
 use futures::{
     stream::{self, BoxStream},
     StreamExt, TryStreamExt,
 };
 use serde::{Deserialize, Serialize};
+use time::format_description::well_known::Rfc3339;
 
 use crate::{
     format::{
-        attributes::AttributesTable, manifest::Manifest, snapshot::Snapshot, transaction_log::TransactionLog, AttributesId, ByteRange, ChunkId, FileTypeTag, ManifestId, SnapshotId
-    }, private, zarr::ObjectId, Storage, StorageError
+        attributes::AttributesTable, manifest::Manifest, snapshot::Snapshot,
+        transaction_log::TransactionLog, AttributesId, ByteRange, ChunkId, FileTypeTag,
+        ManifestId, SnapshotId,
+    },
+    private,
+    zarr::ObjectId,
+    Storage, StorageError,
 };
 
 use super::{ListInfo, StorageResult};
@@ -55,7 +59,6 @@ pub enum AzureStorageCredentials {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Location {
-
     #[serde(rename = "public")]
     Public(String),
     #[serde(rename = "china")]
@@ -74,10 +77,18 @@ pub struct AzureBlobConfig {
 
 pub async fn mk_client(config: &AzureBlobConfig) -> ClientBuilder {
     let (location, account) = match config.cloud_location.clone() {
-        Location::Public(account) => (CloudLocation::Public { account: account.clone() }, Some(account)),
-            Location::China(account) => (CloudLocation::China { account: account.clone() }, Some(account)),
-            Location::Emulator(address, port) => (CloudLocation::Emulator { address, port }, None),
-            Location::Custom(account, uri) => (CloudLocation::Custom {  account: account.clone(), uri }, Some(account)),
+        Location::Public(account) => {
+            (CloudLocation::Public { account: account.clone() }, Some(account))
+        }
+        Location::China(account) => {
+            (CloudLocation::China { account: account.clone() }, Some(account))
+        }
+        Location::Emulator(address, port) => {
+            (CloudLocation::Emulator { address, port }, None)
+        }
+        Location::Custom(account, uri) => {
+            (CloudLocation::Custom { account: account.clone(), uri }, Some(account))
+        }
     };
 
     let storage_credentials = match config.credentials.clone() {
@@ -88,9 +99,13 @@ pub async fn mk_client(config: &AzureBlobConfig) -> ClientBuilder {
             } else {
                 StorageCredentials::access_key(account.unwrap(), key.unwrap())
             }
-        },
-        AzureStorageCredentials::SASToken(token) => StorageCredentials::sas_token(token).unwrap(),
-        AzureStorageCredentials::BearerToken(token) => StorageCredentials::bearer_token(token),
+        }
+        AzureStorageCredentials::SASToken(token) => {
+            StorageCredentials::sas_token(token).unwrap()
+        }
+        AzureStorageCredentials::BearerToken(token) => {
+            StorageCredentials::bearer_token(token)
+        }
     };
 
     ClientBuilder::with_location(location, storage_credentials)
@@ -145,7 +160,7 @@ impl AzureBlobStorage {
     }
 
     fn get_blob_client(&self, blob_name: &str) -> BlobClient {
-            self.client.blob_client(blob_name)
+        self.client.blob_client(blob_name)
     }
 
     async fn get_object(&self, key: &str) -> StorageResult<Bytes> {
@@ -154,28 +169,30 @@ impl AzureBlobStorage {
         Ok(Bytes::from(result))
     }
 
-    async fn get_object_range(&self, key: &str, byte_range: &ByteRange) -> StorageResult<Bytes> {
+    async fn get_object_range(
+        &self,
+        key: &str,
+        byte_range: &ByteRange,
+    ) -> StorageResult<Bytes> {
         let blob_client = self.get_blob_client(key);
         Ok(get_object_range(&blob_client, byte_range)
             .await
             .map_err(StorageError::from)?)
     }
 
-    async fn put_object(
-        &self,
-        key: &str,
-        bytes: Vec<u8>,
-    ) -> StorageResult<()> {
+    async fn put_object(&self, key: &str, bytes: Vec<u8>) -> StorageResult<()> {
         let blob_client = self.get_blob_client(key);
         let body: azure_core::Body = bytes.into();
         blob_client.put_block_blob(body).await?;
         Ok(())
     }
 
-
     fn ref_key(&self, ref_key: &str) -> StorageResult<String> {
         let path = PathBuf::from_iter([self.prefix.as_str(), REF_PREFIX, ref_key]);
-        path.into_os_string().into_string().map(|s| s.replace("\\", "/")).map_err(StorageError::BadPrefix)
+        path.into_os_string()
+            .into_string()
+            .map(|s| s.replace("\\", "/"))
+            .map_err(StorageError::BadPrefix)
     }
 
     async fn create_container_if_not_exists(&self) -> Result<(), StorageError> {
@@ -185,10 +202,12 @@ impl AzureBlobStorage {
 
         self.client.create().await.map_err(StorageError::from)
     }
-
 }
 
-pub async fn get_object_range(blob_client: &BlobClient, byte_range: &ByteRange) -> StorageResult<Bytes> {
+pub async fn get_object_range(
+    blob_client: &BlobClient,
+    byte_range: &ByteRange,
+) -> StorageResult<Bytes> {
     let range = match byte_range {
         ByteRange::Bounded(range) => Some(Range::new(range.start, range.end)),
         ByteRange::From(offset) => Some(Range::new(*offset, u64::MAX)),
@@ -268,11 +287,7 @@ impl Storage for AzureBlobStorage {
     ) -> StorageResult<()> {
         let key = self.get_snapshot_path(&id)?;
         let bytes = rmp_serde::to_vec(snapshot.as_ref())?;
-        self.put_object(
-            key.as_str(),
-            bytes,
-        )
-        .await
+        self.put_object(key.as_str(), bytes).await
     }
 
     async fn write_attributes(
@@ -290,11 +305,7 @@ impl Storage for AzureBlobStorage {
     ) -> Result<(), StorageError> {
         let key = self.get_manifest_path(&id)?;
         let bytes = rmp_serde::to_vec(manifest.as_ref())?;
-        self.put_object(
-            key.as_str(),
-            bytes,
-        )
-        .await
+        self.put_object(key.as_str(), bytes).await
     }
 
     async fn write_chunk(
@@ -315,11 +326,7 @@ impl Storage for AzureBlobStorage {
     ) -> StorageResult<()> {
         let key = self.get_transaction_path(&id)?;
         let bytes = rmp_serde::to_vec(log.as_ref())?;
-        self.put_object(
-            key.as_str(),
-            bytes,
-        )
-        .await
+        self.put_object(key.as_str(), bytes).await
     }
 
     async fn get_ref(&self, ref_key: &str) -> StorageResult<Bytes> {
@@ -335,7 +342,8 @@ impl Storage for AzureBlobStorage {
 
     async fn ref_names(&self) -> StorageResult<Vec<String>> {
         let prefix = self.ref_key("")?;
-        let mut stream = self.client.list_blobs().prefix(prefix.clone()).delimiter("/").into_stream();
+        let mut stream =
+            self.client.list_blobs().prefix(prefix.clone()).delimiter("/").into_stream();
         let mut res = Vec::new();
         while let Some(value) = stream.next().await {
             for grouped_prefix in value?.blobs.prefixes() {
@@ -406,7 +414,8 @@ impl Storage for AzureBlobStorage {
             .prefix(prefix.clone())
             .into_stream()
             .try_filter_map(|page| {
-                let contents = Some(page.blobs.items).map(|cont| stream::iter(cont).map(Ok));
+                let contents =
+                    Some(page.blobs.items).map(|cont| stream::iter(cont).map(Ok));
                 ready(Ok(contents))
             })
             .try_flatten()
@@ -447,22 +456,19 @@ impl Storage for AzureBlobStorage {
 
 fn object_to_list_info(object: &BlobItem) -> Option<ListInfo<String>> {
     let key = match object {
-            BlobItem::Blob(blob) => Some(blob.name.clone()),
-            BlobItem::BlobPrefix(_) => None,
-        };
+        BlobItem::Blob(blob) => Some(blob.name.clone()),
+        BlobItem::BlobPrefix(_) => None,
+    };
     let last_modified = match object {
         BlobItem::Blob(blob) => Some(blob.properties.last_modified.clone()),
         BlobItem::BlobPrefix(_) => None,
     };
 
     // convert from time::OffsetDateTime to chrono::DateTime<Utc>
-    let created_at = last_modified
-        .and_then(|dt| {
-            let formatted = dt.format(&Rfc3339).ok()?;
-            DateTime::parse_from_rfc3339(&formatted)
-                .ok()
-                .map(|dt| dt.with_timezone(&Utc))
-        })?;
+    let created_at = last_modified.and_then(|dt| {
+        let formatted = dt.format(&Rfc3339).ok()?;
+        DateTime::parse_from_rfc3339(&formatted).ok().map(|dt| dt.with_timezone(&Utc))
+    })?;
     let id = Path::new(key.as_ref()?).file_name().and_then(|s| s.to_str())?.to_string();
     Some(ListInfo { id, created_at })
 }
