@@ -3,6 +3,7 @@ import datetime
 from collections.abc import AsyncGenerator
 from typing import Any
 
+
 class PyIcechunkStore:
     def as_bytes(self) -> bytes: ...
     def set_read_only(self, read_only: bool) -> None: ...
