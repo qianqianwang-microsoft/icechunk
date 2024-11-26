@@ -37,7 +37,7 @@ use crate::{
     storage::{
         s3::{S3Config, S3Storage},
         virtual_ref::ObjectStoreVirtualChunkResolverConfig,
-        azure_blob::{AzureBlobConfig, AzureBlobStorage}, 
+        azure_blob::{AzureBlobConfig, AzureBlobStorage},
     },
     ObjectStorage, Repository, RepositoryBuilder, SnapshotMetadata, Storage,
 };

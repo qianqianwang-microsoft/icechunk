@@ -29,12 +29,12 @@ services:
     image: mcr.microsoft.com/azure-storage/azurite:3.26.0
     container_name: azurite
     hostname: azurite
-    healthcheck: 
+    healthcheck:
       test: nc 127.0.0.1 10000 -z
       interval: 1s
       retries: 30
     command:
-      "azurite --silent --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 -l 
+      "azurite --silent --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 -l
       /workspace"
     ports:
       - "10000:10000" # Blob

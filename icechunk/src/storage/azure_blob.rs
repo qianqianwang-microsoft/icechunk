@@ -55,7 +55,7 @@ pub enum AzureStorageCredentials {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Location {
-    
+
     #[serde(rename = "public")]
     Public(String),
     #[serde(rename = "china")]
@@ -172,7 +172,7 @@ impl AzureBlobStorage {
         Ok(())
     }
 
-    
+
     fn ref_key(&self, ref_key: &str) -> StorageResult<String> {
         let path = PathBuf::from_iter([self.prefix.as_str(), REF_PREFIX, ref_key]);
         path.into_os_string().into_string().map(|s| s.replace("\\", "/")).map_err(StorageError::BadPrefix)
@@ -345,7 +345,7 @@ impl Storage for AzureBlobStorage {
                     .and_then(|key| key.strip_suffix('/'))
                 {
                     res.push(key.to_string());
-                }                
+                }
             }
         }
 
@@ -358,7 +358,7 @@ impl Storage for AzureBlobStorage {
     ) -> StorageResult<BoxStream<StorageResult<String>>> {
         let prefix = self.ref_key(ref_name)?;
         let mut pageable = self.client.list_blobs().prefix(prefix.clone()).into_stream();
-        
+
         let prefix = prefix + "/";
         let stream = try_stream! {
             while let Some(value) = pageable.next().await {
@@ -452,7 +452,7 @@ fn object_to_list_info(object: &BlobItem) -> Option<ListInfo<String>> {
         };
     let last_modified = match object {
         BlobItem::Blob(blob) => Some(blob.properties.last_modified.clone()),
-        BlobItem::BlobPrefix(_) => None,        
+        BlobItem::BlobPrefix(_) => None,
     };
 
     // convert from time::OffsetDateTime to chrono::DateTime<Utc>

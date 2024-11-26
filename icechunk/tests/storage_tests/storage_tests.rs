@@ -13,7 +13,7 @@ pub mod storage_tests {
     };
     use pretty_assertions::assert_eq;
 
-    pub async fn test_snapshot_write_read<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage {        
+    pub async fn test_snapshot_write_read<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage {
         let id = SnapshotId::random();
         let snapshot = Arc::new(Snapshot::empty());
         storage.write_snapshot(id.clone(), snapshot.clone()).await?;
@@ -22,7 +22,7 @@ pub mod storage_tests {
         Ok(())
     }
 
-    pub async fn test_manifest_write_read<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage {        
+    pub async fn test_manifest_write_read<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage {
         let id = ManifestId::random();
         let manifest = Arc::new(Manifest::default());
         storage.write_manifests(id.clone(), manifest.clone()).await?;
@@ -31,7 +31,7 @@ pub mod storage_tests {
         Ok(())
     }
 
-    pub async fn test_chunk_write_read<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage {        
+    pub async fn test_chunk_write_read<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage {
         let id = ChunkId::random();
         let bytes = Bytes::from_static(b"hello");
         storage.write_chunk(id.clone(), bytes.clone()).await?;
@@ -53,7 +53,7 @@ pub mod storage_tests {
         Ok(())
     }
 
-    pub async fn test_tag_write_get<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {        
+    pub async fn test_tag_write_get<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {
         let id = SnapshotId::random();
         create_tag(&storage, "mytag", id.clone(), false).await?;
         let back = fetch_tag(&storage, "mytag").await?;
@@ -61,7 +61,7 @@ pub mod storage_tests {
         Ok(())
     }
 
-    pub async fn test_fetch_non_existing_tag<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {        
+    pub async fn test_fetch_non_existing_tag<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {
         let id = SnapshotId::random();
         create_tag(&storage, "mytag", id.clone(), false).await?;
 
@@ -70,7 +70,7 @@ pub mod storage_tests {
         Ok(())
     }
 
-    pub async fn test_create_existing_tag<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {        
+    pub async fn test_create_existing_tag<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {
         let id = SnapshotId::random();
         create_tag(&storage, "mytag", id.clone(), false).await?;
 
@@ -79,7 +79,7 @@ pub mod storage_tests {
         Ok(())
     }
 
-    pub async fn test_branch_initialization<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {        
+    pub async fn test_branch_initialization<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {
         let id = SnapshotId::random();
 
         let res = update_branch(&storage, "some-branch", id.clone(), None, false).await?;
@@ -91,7 +91,7 @@ pub mod storage_tests {
         Ok(())
     }
 
-    pub async fn test_fetch_non_existing_branch<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {   
+    pub async fn test_fetch_non_existing_branch<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {
         let id = SnapshotId::random();
         update_branch(&storage, "some-branch", id.clone(), None, false).await?;
 
@@ -100,7 +100,7 @@ pub mod storage_tests {
         Ok(())
     }
 
-    pub async fn test_branch_update<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {   
+    pub async fn test_branch_update<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {
         let id1 = SnapshotId::random();
         let id2 = SnapshotId::random();
         let id3 = SnapshotId::random();
@@ -122,7 +122,7 @@ pub mod storage_tests {
         Ok(())
     }
 
-    pub async fn test_ref_names<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {   
+    pub async fn test_ref_names<T>(storage : T) -> Result<(), Box<dyn std::error::Error>> where T: storage::Storage + Send + Sync {
         let id1 = SnapshotId::random();
         let id2 = SnapshotId::random();
         update_branch(&storage, "main", id1.clone(), None, false).await?;
