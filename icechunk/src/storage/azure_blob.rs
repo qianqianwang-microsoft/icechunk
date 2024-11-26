@@ -176,9 +176,7 @@ impl AzureBlobStorage {
         byte_range: &ByteRange,
     ) -> StorageResult<Bytes> {
         let blob_client = self.get_blob_client(key);
-        get_object_range(&blob_client, byte_range)
-            .await
-            .map_err(StorageError::from)
+        get_object_range(&blob_client, byte_range).await.map_err(StorageError::from)
     }
 
     async fn put_object(&self, key: &str, bytes: Vec<u8>) -> StorageResult<()> {
