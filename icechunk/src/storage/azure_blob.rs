@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use std::{
     future::ready,
     path::{Path, PathBuf},
