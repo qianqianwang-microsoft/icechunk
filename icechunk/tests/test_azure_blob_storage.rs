@@ -11,8 +11,11 @@ use icechunk::{
         create_tag, fetch_branch_tip, fetch_tag, list_refs, update_branch, Ref, RefError,
     },
     storage::{
-        azure_blob::{create_container_if_not_exists, AzureBlobConfig, AzureBlobStorage, AzureStorageCredentials, Location},
-        StorageResult
+        azure_blob::{
+            create_container_if_not_exists, AzureBlobConfig, AzureBlobStorage,
+            AzureStorageCredentials, Location,
+        },
+        StorageResult,
     },
     Storage,
 };
@@ -31,7 +34,7 @@ async fn mk_storage() -> StorageResult<AzureBlobStorage> {
     if let Ok(ref s) = storage {
         create_container_if_not_exists(s).await?;
     }
-    Ok(storage?)
+    storage
 }
 
 #[tokio::test]
