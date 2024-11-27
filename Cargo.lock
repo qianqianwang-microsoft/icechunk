@@ -1517,7 +1517,6 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-s3",
  "aws-smithy-types-convert",
- "azure_core",
  "azure_storage",
  "azure_storage_blobs",
  "base32",

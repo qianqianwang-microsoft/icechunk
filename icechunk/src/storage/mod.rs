@@ -55,7 +55,7 @@ pub enum StorageError {
     #[error("error streaming bytes from object store {0}")]
     S3StreamError(#[from] ByteStreamError),
     #[error("error with azure storage operation {0}")]
-    AzureBlobError(#[from] azure_core::Error),
+    AzureBlobError(#[from] azure_storage::Error),
     #[error("messagepack decode error: {0}")]
     MsgPackDecodeError(#[from] rmp_serde::decode::Error),
     #[error("messagepack encode error: {0}")]

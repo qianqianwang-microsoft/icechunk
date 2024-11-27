@@ -10,7 +10,6 @@ use std::{
 
 use async_stream::try_stream;
 use async_trait::async_trait;
-use azure_core::prelude::Range;
 use azure_storage::{prelude::*, CloudLocation};
 use azure_storage_blobs::{container::operations::BlobItem, prelude::*};
 use bytes::Bytes;
@@ -181,8 +180,7 @@ impl AzureBlobStorage {
 
     async fn put_object(&self, key: &str, bytes: Vec<u8>) -> StorageResult<()> {
         let blob_client = self.get_blob_client(key);
-        let body: azure_core::Body = bytes.into();
-        blob_client.put_block_blob(body).await?;
+        blob_client.put_block_blob(bytes).await?;
         Ok(())
     }
 
@@ -208,15 +206,15 @@ pub async fn get_object_range(
     byte_range: &ByteRange,
 ) -> StorageResult<Bytes> {
     let range = match byte_range {
-        ByteRange::Bounded(range) => Some(Range::new(range.start, range.end)),
-        ByteRange::From(offset) => Some(Range::new(*offset, u64::MAX)),
-        ByteRange::Last(n) => Some(Range::new(u64::MAX - n, u64::MAX)),
+        ByteRange::Bounded(range) => range.start..range.end,
+        ByteRange::From(offset) => *offset..u64::MAX,
+        ByteRange::Last(n) => u64::MAX - n..u64::MAX,
     };
 
     let mut result: Vec<u8> = vec![];
 
     // The stream is composed of individual calls to the get blob endpoint
-    let mut stream = blob_client.get().range(range.unwrap()).into_stream();
+    let mut stream = blob_client.get().range(range).into_stream();
     while let Some(value) = stream.next().await {
         let mut body = value?.data;
         // For each response, we stream the body instead of collecting it all
@@ -392,8 +390,7 @@ impl Storage for AzureBlobStorage {
         if !overwrite_refs && blob_client.exists().await? {
             return Err(StorageError::RefAlreadyExists(key));
         }
-        let body: azure_core::Body = bytes.into();
-        blob_client.put_block_blob(body).await?;
+        blob_client.put_block_blob(bytes).await?;
         Ok(())
     }
 
