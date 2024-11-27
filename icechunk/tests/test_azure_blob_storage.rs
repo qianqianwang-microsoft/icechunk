@@ -19,7 +19,7 @@ use icechunk::{
 use pretty_assertions::assert_eq;
 
 async fn mk_storage() -> StorageResult<AzureBlobStorage> {
-    let storage = AzureBlobStorage::new_azure_blob_store (
+    let storage = AzureBlobStorage::new_azure_blob_store(
         "testcontainer".to_string(),
         "test_blob_storage__".to_string() + Utc::now().to_rfc3339().as_str(),
         &AzureBlobConfig {
