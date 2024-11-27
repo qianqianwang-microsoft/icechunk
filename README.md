@@ -105,6 +105,16 @@ Icechunk's design protects against the race condition in which two uncoordinated
 Icechunk also defines **tags**--_immutable_ references to snapshot.
 Tags are appropriate for publishing specific releases of a repository or for any application which requires a persistent, immutable identifier to the store state.
 
+### Running the autoformatters
+
+(all from the root dir)
+
+```bash
+pre-commit run --all-files
+just format "-p icechunk-python"
+cargo clippy --fix --allow-dirty
+```
+
 ### Chunk References
 
 Chunk references are "pointers" to chunks that exist in other files--HDF5, NetCDF, GRIB, etc.
