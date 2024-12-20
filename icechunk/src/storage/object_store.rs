@@ -13,15 +13,22 @@ use futures::{
     StreamExt, TryStreamExt,
 };
 use object_store::{
-    azure::MicrosoftAzureBuilder, local::LocalFileSystem, parse_url_opts, path::Path as ObjectPath, Attribute, AttributeValue, Attributes, GetOptions, GetRange, ObjectMeta, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion
+    azure::MicrosoftAzureBuilder, local::LocalFileSystem, parse_url_opts,
+    path::Path as ObjectPath, Attribute, AttributeValue, Attributes, GetOptions,
+    GetRange, ObjectMeta, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion,
 };
 
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::create_dir_all, future::ready, ops::Range, path::Path as StdPath, str::FromStr, sync::{
+    fs::create_dir_all,
+    future::ready,
+    ops::Range,
+    path::Path as StdPath,
+    str::FromStr,
+    sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
-    }
+    },
 };
 use url::Url;
 
@@ -121,7 +128,8 @@ impl ObjectStorage {
         config: AzureBlobStoreConfig,
     ) -> Result<ObjectStorage, StorageError> {
         let builder = config.to_builder();
-        let store = Arc::new(builder.build().map_err(|e| StorageError::Other(e.to_string()))?);
+        let store =
+            Arc::new(builder.build().map_err(|e| StorageError::Other(e.to_string()))?);
 
         let options = config
             .options
@@ -178,7 +186,8 @@ impl ObjectStorage {
 
     /// We need this because object_store's local file implementation doesn't support metadata.
     pub fn supports_metadata(&self) -> bool {
-        !self.config.url.starts_with("file") && !self.config.url.starts_with("azure") // temporarily disable metadata for azure because azure metadata doesn't allow "-"s
+        !self.config.url.starts_with("file") && !self.config.url.starts_with("azure")
+        // temporarily disable metadata for azure because azure metadata doesn't allow "-"s
     }
 
     /// Return all keys in the store
@@ -630,7 +639,7 @@ fn object_to_list_info(object: &ObjectMeta) -> Option<ListInfo<String>> {
 mod tests {
     use tempfile::TempDir;
 
-    use super::{ ObjectStorage, AzureBlobStoreConfig };
+    use super::{AzureBlobStoreConfig, ObjectStorage};
 
     #[test]
     fn test_serialize_object_store() {
@@ -653,14 +662,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_serialize_object_store_for_azure() {
-        let options = Vec::from([("account_name".to_string(), "devstoreaccount1".to_string()), ("use_emulator".to_string(), true.to_string())]);
+        let options = Vec::from([
+            ("account_name".to_string(), "devstoreaccount1".to_string()),
+            ("use_emulator".to_string(), true.to_string()),
+        ]);
 
         let config = AzureBlobStoreConfig {
             from_env: false,
             container: "container".to_string(),
             options: options,
         };
-        let store = ObjectStorage::new_azure_blob_store("icechunk".to_string(), config).await.unwrap();
+        let store = ObjectStorage::new_azure_blob_store("icechunk".to_string(), config)
+            .await
+            .unwrap();
 
         let serialized = serde_json::to_string(&store).unwrap();
 

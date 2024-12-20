@@ -11,7 +11,9 @@ use icechunk::{
         create_tag, fetch_branch_tip, fetch_tag, list_refs, update_branch, Ref, RefError,
     },
     storage::{
-        object_store::AzureBlobStoreConfig, s3::{S3ClientOptions, S3Config, S3Credentials, S3Storage, StaticS3Credentials}, StorageResult
+        object_store::AzureBlobStoreConfig,
+        s3::{S3ClientOptions, S3Config, S3Credentials, S3Storage, StaticS3Credentials},
+        StorageResult,
     },
     ObjectStorage, Storage, StorageError,
 };
