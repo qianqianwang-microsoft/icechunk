@@ -26,7 +26,7 @@ services:
       - '9001:9001'
 
   azurite:
-    image: mcr.microsoft.com/azure-storage/azurite:3.26.0
+    image: mcr.microsoft.com/azure-storage/azurite:3.33.0
     container_name: azurite
     hostname: azurite
     healthcheck:
