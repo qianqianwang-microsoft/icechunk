@@ -90,6 +90,7 @@ impl AzureBlobStoreConfig {
         };
 
         for (k, v) in self.options.iter() {
+            #[allow(clippy::expect_used)]
             let config_key = object_store::azure::AzureConfigKey::from_str(k)
                 .expect("Unexpected Azure config key");
 
