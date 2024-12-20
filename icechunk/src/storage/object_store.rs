@@ -90,7 +90,9 @@ impl AzureBlobStoreConfig {
         };
 
         for (k, v) in self.options.iter() {
-            let config_key = object_store::azure::AzureConfigKey::from_str(k).unwrap();
+            let config_key = object_store::azure::AzureConfigKey::from_str(k)
+                .expect("Unexpected Azure config key");
+
             builder = builder.with_config(config_key, v);
         }
 
@@ -141,7 +143,7 @@ impl ObjectStorage {
             config: ObjectStorageConfig {
                 url: format!("azure://{}/{}", config.container, prefix),
                 prefix: prefix.to_string(),
-                options: options,
+                options,
             },
         })
     }
@@ -670,7 +672,7 @@ mod tests {
         let config = AzureBlobStoreConfig {
             from_env: false,
             container: "container".to_string(),
-            options: options,
+            options,
         };
         let store = ObjectStorage::new_azure_blob_store("icechunk".to_string(), config)
             .await
