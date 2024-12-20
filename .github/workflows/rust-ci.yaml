@@ -71,6 +71,10 @@ jobs:
           done
           docker compose exec -T minio mc alias set minio http://minio:9000 minio123 minio123
 
+      - name: Stand up Azurite
+        run: |
+          docker compose up -d azurite
+
       - name: Install Just
         run: sudo snap install --edge --classic just
 
