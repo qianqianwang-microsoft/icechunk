@@ -11,8 +11,7 @@ use icechunk::{
         create_tag, fetch_branch_tip, fetch_tag, list_refs, update_branch, Ref, RefError,
     },
     storage::{
-        s3::{S3ClientOptions, S3Config, S3Credentials, S3Storage, StaticS3Credentials},
-        StorageResult,
+        object_store::AzureBlobStoreConfig, s3::{S3ClientOptions, S3Config, S3Credentials, S3Storage, StaticS3Credentials}, StorageResult
     },
     ObjectStorage, Storage, StorageError,
 };
@@ -41,6 +40,22 @@ fn mk_in_memory_storage() -> ObjectStorage {
     ObjectStorage::new_in_memory_store(Some("prefix".to_string())).unwrap()
 }
 
+async fn mk_azure_blob_storage() -> StorageResult<ObjectStorage> {
+    let azure_config = AzureBlobStoreConfig {
+        from_env: false,
+        container: "testcontainer".to_string(),
+        options: vec![
+            ("account_name".to_string(), "devstoreaccount1".to_string()),
+            ("use_emulator".to_string(), true.to_string()),
+        ],
+    };
+    ObjectStorage::new_azure_blob_store(
+        "test_blob_storage__".to_string() + Utc::now().to_rfc3339().as_str(),
+        azure_config,
+    )
+    .await
+}
+
 async fn with_storage<F, Fut>(f: F) -> Result<(), Box<dyn std::error::Error>>
 where
     F: Fn(Arc<dyn Storage + Send + Sync>) -> Fut,
@@ -48,8 +63,10 @@ where
 {
     let s1 = Arc::new(mk_storage().await?);
     let s2 = Arc::new(mk_in_memory_storage());
+    let s3 = Arc::new(mk_azure_blob_storage().await?);
     f(s1).await?;
     f(s2).await?;
+    f(s3).await?;
     Ok(())
 }
 
