@@ -13,9 +13,9 @@ use futures::{
     StreamExt, TryStreamExt,
 };
 use object_store::{
-    local::LocalFileSystem, parse_url_opts,
-    path::Path as ObjectPath, Attribute, AttributeValue, Attributes, GetOptions,
-    GetRange, ObjectMeta, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion,
+    local::LocalFileSystem, parse_url_opts, path::Path as ObjectPath, Attribute,
+    AttributeValue, Attributes, GetOptions, GetRange, ObjectMeta, ObjectStore, PutMode,
+    PutOptions, PutPayload, UpdateVersion,
 };
 
 use serde::{Deserialize, Serialize};
@@ -727,9 +727,13 @@ mod tests {
             ("use_emulator".to_string(), true.to_string()),
         ]);
 
-        let store = ObjectStorage::new_azure_blob_store("icechunk".to_string(), "container".to_string(), options)
-            .await
-            .unwrap();
+        let store = ObjectStorage::new_azure_blob_store(
+            "icechunk".to_string(),
+            "container".to_string(),
+            options,
+        )
+        .await
+        .unwrap();
 
         let serialized = serde_json::to_string(&store).unwrap();
 

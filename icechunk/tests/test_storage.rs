@@ -11,8 +11,7 @@ use icechunk::{
         create_tag, fetch_branch_tip, fetch_tag, list_refs, update_branch, Ref, RefError,
     },
     storage::{
-        new_in_memory_storage, new_s3_storage,
-        object_store::ObjectStorageConfig,
+        new_in_memory_storage, new_s3_storage, object_store::ObjectStorageConfig,
         StorageResult,
     },
     ObjectStorage, Repository, Storage, StorageError,
@@ -73,12 +72,15 @@ async fn mk_s3_object_store_storage(
 }
 
 async fn mk_azure_blob_storage(prefix: &str) -> StorageResult<ObjectStorage> {
-    ObjectStorage::new_azure_blob_store(prefix.to_string(),
-    "testcontainer".to_string(),
-    vec![
+    ObjectStorage::new_azure_blob_store(
+        prefix.to_string(),
+        "testcontainer".to_string(),
+        vec![
             ("account_name".to_string(), "devstoreaccount1".to_string()),
             ("use_emulator".to_string(), true.to_string()),
-        ]).await
+        ],
+    )
+    .await
 }
 
 async fn with_storage<F, Fut>(f: F) -> Result<(), Box<dyn std::error::Error>>
