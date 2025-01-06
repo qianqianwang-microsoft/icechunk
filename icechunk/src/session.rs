@@ -31,9 +31,9 @@ use crate::{
     },
     metadata::UserAttributes,
     refs::{fetch_branch_tip, update_branch, RefError},
-    repository::{RepositoryConfig, RepositoryError},
+    repository::RepositoryError,
     virtual_chunks::VirtualChunkResolver,
-    Storage, StorageError,
+    RepositoryConfig, Storage, StorageError,
 };
 
 #[derive(Debug, Error)]
@@ -49,6 +49,8 @@ pub enum SessionError {
     SnapshotNotFound { id: SnapshotId },
     #[error("error in icechunk file")]
     FormatError(#[from] IcechunkFormatError),
+    #[error("no ancestor node was found for `{prefix}`")]
+    AncestorNodeNotFound { prefix: Path },
     #[error("node not found at `{path}`: {message}")]
     NodeNotFound { path: Path, message: String },
     #[error("there is not an array at `{node:?}`: {message}")]
@@ -155,6 +157,10 @@ impl Session {
         &self.change_set
     }
 
+    pub fn config(&self) -> &RepositoryConfig {
+        &self.config
+    }
+
     /// Add a group to the store.
     ///
     /// Calling this only records the operation in memory, doesn't have any consequence on the storage
@@ -173,6 +179,16 @@ impl Session {
         }
     }
 
+    pub async fn delete_node(&mut self, node: NodeSnapshot) -> SessionResult<()> {
+        match node {
+            NodeSnapshot { node_data: NodeData::Group, path: node_path, .. } => {
+                Ok(self.delete_group(node_path).await?)
+            }
+            NodeSnapshot { node_data: NodeData::Array(..), path: node_path, .. } => {
+                Ok(self.delete_array(node_path).await?)
+            }
+        }
+    }
     /// Delete a group in the hierarchy
     ///
     /// Deletes of non existing groups will succeed.
@@ -250,6 +266,18 @@ impl Session {
         Ok(())
     }
 
+    pub async fn delete_chunks(
+        &mut self,
+        node_path: &Path,
+        coords: impl IntoIterator<Item = ChunkIndices>,
+    ) -> SessionResult<()> {
+        let node = self.get_array(node_path).await?;
+        for coord in coords {
+            self.set_node_chunk_ref(node.clone(), coord, None).await?
+        }
+        Ok(())
+    }
+
     /// Record the write or delete of user attributes to array or group
     pub async fn set_user_attributes(
         &mut self,
@@ -261,7 +289,7 @@ impl Session {
         Ok(())
     }
 
-    // Record the write, referenceing or delete of a chunk
+    // Record the write, referencing or delete of a chunk
     //
     // Caller has to write the chunk before calling this.
     pub async fn set_chunk_ref(
@@ -271,20 +299,46 @@ impl Session {
         data: Option<ChunkPayload>,
     ) -> SessionResult<()> {
         let node_snapshot = self.get_array(&path).await?;
+        self.set_node_chunk_ref(node_snapshot, coord, data).await
+    }
 
-        if let NodeData::Array(zarr_metadata, _) = node_snapshot.node_data {
+    // Helper function that accepts a NodeSnapshot instead of a path,
+    // this lets us do bulk sets (and deletes) without repeatedly grabbing the node.
+    async fn set_node_chunk_ref(
+        &mut self,
+        node: NodeSnapshot,
+        coord: ChunkIndices,
+        data: Option<ChunkPayload>,
+    ) -> SessionResult<()> {
+        if let NodeData::Array(zarr_metadata, _) = node.node_data {
             if zarr_metadata.valid_chunk_coord(&coord) {
-                self.change_set.set_chunk_ref(node_snapshot.id, coord, data);
+                self.change_set.set_chunk_ref(node.id, coord, data);
                 Ok(())
             } else {
-                Err(SessionError::InvalidIndex { coords: coord, path: path.clone() })
+                Err(SessionError::InvalidIndex { coords: coord, path: node.path.clone() })
             }
         } else {
             Err(SessionError::NotAnArray {
-                node: node_snapshot,
+                node: node.clone(),
                 message: "getting an array".to_string(),
             })
         }
+    }
+
+    pub async fn get_closest_ancestor_node(
+        &self,
+        path: &Path,
+    ) -> SessionResult<NodeSnapshot> {
+        let mut ancestors = path.ancestors();
+        // the first element is the `path` itself, which we have already tested
+        ancestors.next();
+        for parent in ancestors {
+            let node = self.get_node(&parent).await;
+            if node.is_ok() {
+                return node;
+            }
+        }
+        Err(SessionError::AncestorNodeNotFound { prefix: path.clone() })
     }
 
     pub async fn get_node(&self, path: &Path) -> SessionResult<NodeSnapshot> {
@@ -311,6 +365,19 @@ impl Session {
             }),
             other => other,
         }
+    }
+
+    pub async fn array_chunk_iterator<'a>(
+        &'a self,
+        path: &Path,
+    ) -> impl Stream<Item = SessionResult<ChunkInfo>> + 'a {
+        node_chunk_iterator(
+            self.storage.as_ref(),
+            &self.change_set,
+            &self.snapshot_id,
+            path,
+        )
+        .await
     }
 
     pub async fn get_chunk_ref(
@@ -472,8 +539,7 @@ impl Session {
     ) -> SessionResult<Option<ChunkPayload>> {
         // FIXME: use manifest extents
         for manifest in manifests {
-            let manifest_structure =
-                self.storage.fetch_manifests(&manifest.object_id).await?;
+            let manifest_structure = self.fetch_manifest(&manifest.object_id).await?;
             match manifest_structure.get_chunk_payload(&node, coords.clone()) {
                 Ok(payload) => {
                     return Ok(Some(payload.clone()));
@@ -483,6 +549,10 @@ impl Session {
             }
         }
         Ok(None)
+    }
+
+    async fn fetch_manifest(&self, id: &ManifestId) -> SessionResult<Arc<Manifest>> {
+        fetch_manifest(id, self.snapshot_id(), self.storage.as_ref()).await
     }
 
     pub async fn list_nodes(
@@ -496,6 +566,17 @@ impl Session {
         &self,
     ) -> SessionResult<impl Stream<Item = SessionResult<(Path, ChunkInfo)>> + '_> {
         all_chunks(self.storage.as_ref(), &self.change_set, self.snapshot_id()).await
+    }
+
+    pub async fn all_virtual_chunk_locations(
+        &self,
+    ) -> SessionResult<impl Stream<Item = SessionResult<String>> + '_> {
+        let stream =
+            self.all_chunks().await?.try_filter_map(|(_, info)| match info.payload {
+                ChunkPayload::Virtual(reference) => ready(Ok(Some(reference.location.0))),
+                _ => ready(Ok(None)),
+            });
+        Ok(stream)
     }
 
     /// Discard all uncommitted changes and return them as a `ChangeSet`
@@ -698,11 +779,20 @@ async fn updated_chunk_iterator<'a>(
 ) -> SessionResult<impl Stream<Item = SessionResult<(Path, ChunkInfo)>> + 'a> {
     let snapshot = storage.fetch_snapshot(snapshot_id).await?;
     let nodes = futures::stream::iter(snapshot.iter_arc());
-    let res = nodes.then(move |node| async move {
-        let path = node.path.clone();
-        node_chunk_iterator(storage, change_set, snapshot_id, &node.path)
-            .await
-            .map_ok(move |ci| (path.clone(), ci))
+    let res = nodes.filter_map(move |node| async move {
+        // This iterator should yield chunks for existing arrays + any updates.
+        // we check for deletion here in the case that `path` exists in the snapshot,
+        // and was deleted and then recreated in this changeset.
+        if change_set.is_deleted(&node.path, &node.id) {
+            None
+        } else {
+            let path = node.path.clone();
+            Some(
+                node_chunk_iterator(storage, change_set, snapshot_id, &node.path)
+                    .await
+                    .map_ok(move |ci| (path.clone(), ci)),
+            )
+        }
     });
     Ok(res.flatten())
 }
@@ -711,12 +801,12 @@ async fn updated_chunk_iterator<'a>(
 async fn node_chunk_iterator<'a>(
     storage: &'a (dyn Storage + Send + Sync),
     change_set: &'a ChangeSet,
-    snapshot_id: &SnapshotId,
+    snapshot_id: &'a SnapshotId,
     path: &Path,
 ) -> impl Stream<Item = SessionResult<ChunkInfo>> + 'a {
     match get_node(storage, change_set, snapshot_id, path).await {
         Ok(node) => futures::future::Either::Left(
-            verified_node_chunk_iterator(storage, change_set, node).await,
+            verified_node_chunk_iterator(storage, snapshot_id, change_set, node).await,
         ),
         Err(_) => futures::future::Either::Right(futures::stream::empty()),
     }
@@ -725,12 +815,14 @@ async fn node_chunk_iterator<'a>(
 /// Warning: The presence of a single error may mean multiple missing items
 async fn verified_node_chunk_iterator<'a>(
     storage: &'a (dyn Storage + Send + Sync),
+    snapshot_id: &'a SnapshotId,
     change_set: &'a ChangeSet,
     node: NodeSnapshot,
 ) -> impl Stream<Item = SessionResult<ChunkInfo>> + 'a {
     match node.node_data {
         NodeData::Group => futures::future::Either::Left(futures::stream::empty()),
-        NodeData::Array(_, manifests) => {
+        NodeData::Array(meta, manifests) => {
+            let ndim = meta.shape.len();
             let new_chunk_indices: Box<HashSet<&ChunkIndices>> = Box::new(
                 change_set
                     .array_chunks_iterator(&node.id, &node.path)
@@ -760,13 +852,16 @@ async fn verified_node_chunk_iterator<'a>(
                             let node_id_c2 = node.id.clone();
                             let node_id_c3 = node.id.clone();
                             async move {
-                                let manifest = storage
-                                    .fetch_manifests(&manifest_ref.object_id)
-                                    .await;
+                                let manifest = fetch_manifest(
+                                    &manifest_ref.object_id,
+                                    snapshot_id,
+                                    storage,
+                                )
+                                .await;
                                 match manifest {
                                     Ok(manifest) => {
                                         let old_chunks = manifest
-                                            .iter(node_id_c.clone())
+                                            .iter(node_id_c.clone(), ndim)
                                             .filter(move |(coord, _)| {
                                                 !new_chunk_indices.contains(coord)
                                             })
@@ -787,9 +882,7 @@ async fn verified_node_chunk_iterator<'a>(
                                     // if we cannot even fetch the manifest, we generate a
                                     // single error value.
                                     Err(err) => futures::future::Either::Right(
-                                        futures::stream::once(ready(Err(
-                                            SessionError::StorageError(err),
-                                        ))),
+                                        futures::stream::once(ready(Err(err))),
                                     ),
                                 }
                             }
@@ -1011,27 +1104,29 @@ async fn flush(
         .map_ok(|(_path, chunk_info)| chunk_info);
 
     let new_manifest = Arc::new(Manifest::from_stream(chunks).await?);
-    let new_manifest_id = if new_manifest.len() > 0 {
+    let new_manifest_info = if new_manifest.len() > 0 {
         let id = ObjectId::random();
-        storage.write_manifests(id.clone(), Arc::clone(&new_manifest)).await?;
-        Some(id)
+        let size = storage.write_manifests(id.clone(), Arc::clone(&new_manifest)).await?;
+        Some((id, size))
     } else {
         None
     };
 
+    let new_manifest_id = new_manifest_info.as_ref().map(|info| &info.0);
     let all_nodes =
-        updated_nodes(storage, change_set, parent_id, new_manifest_id.as_ref()).await?;
+        updated_nodes(storage, change_set, parent_id, new_manifest_id).await?;
 
     let old_snapshot = storage.fetch_snapshot(parent_id).await?;
     let mut new_snapshot = Snapshot::from_iter(
         old_snapshot.as_ref(),
         Some(properties),
-        new_manifest_id
+        new_manifest_info
             .as_ref()
-            .map(|mid| {
+            .map(|(mid, msize)| {
                 vec![ManifestFileInfo {
                     id: mid.clone(),
                     format_version: new_manifest.icechunk_manifest_format_version,
+                    size: *msize,
                 }]
             })
             .unwrap_or_default(),
@@ -1085,6 +1180,18 @@ async fn do_commit(
     Ok(id)
 }
 
+async fn fetch_manifest(
+    manifest_id: &ManifestId,
+    snapshot_id: &SnapshotId,
+    storage: &(dyn Storage + Send + Sync),
+) -> SessionResult<Arc<Manifest>> {
+    let snapshot = storage.fetch_snapshot(snapshot_id).await?;
+    let manifest_info = snapshot.manifest_info(manifest_id).ok_or_else(|| {
+        IcechunkFormatError::ManifestInfoNotFound { manifest_id: manifest_id.clone() }
+    })?;
+    Ok(storage.fetch_manifests(manifest_id, manifest_info.size).await?)
+}
+
 #[cfg(test)]
 #[allow(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1100,7 +1207,7 @@ mod tests {
         },
         refs::{fetch_ref, Ref},
         repository::VersionInfo,
-        storage::logging::LoggingStorage,
+        storage::{logging::LoggingStorage, new_in_memory_storage},
         strategies::{empty_writable_session, node_paths, zarr_array_metadata},
         ObjectStorage, Repository,
     };
@@ -1113,10 +1220,7 @@ mod tests {
     use tokio::sync::Barrier;
 
     async fn create_memory_store_repository() -> Repository {
-        let storage = Arc::new(
-            ObjectStorage::new_in_memory_store(Some("prefix".into()))
-                .expect("failed to create in-memory store"),
-        );
+        let storage = new_in_memory_storage().expect("failed to create in-memory store");
         Repository::create(None, storage, HashMap::new()).await.unwrap()
     }
 
@@ -1224,7 +1328,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_repository_with_updates() -> Result<(), Box<dyn Error>> {
-        let storage = ObjectStorage::new_in_memory_store(Some("prefix".into()))?;
+        let storage = new_in_memory_storage()?;
 
         let array_id = NodeId::random();
         let chunk1 = ChunkInfo {
@@ -1246,7 +1350,8 @@ mod tests {
         let manifest =
             Arc::new(vec![chunk1.clone(), chunk2.clone()].into_iter().collect());
         let manifest_id = ObjectId::random();
-        storage.write_manifests(manifest_id.clone(), Arc::clone(&manifest)).await?;
+        let manifest_size =
+            storage.write_manifests(manifest_id.clone(), Arc::clone(&manifest)).await?;
 
         let zarr_meta1 = ZarrArrayMetadata {
             shape: vec![2, 2, 2],
@@ -1296,6 +1401,7 @@ mod tests {
         let manifests = vec![ManifestFileInfo {
             id: manifest_id.clone(),
             format_version: manifest.icechunk_manifest_format_version,
+            size: manifest_size,
         }];
         let snapshot = Arc::new(Snapshot::from_iter(
             &initial,
@@ -1306,10 +1412,11 @@ mod tests {
         ));
         let snapshot_id = ObjectId::random();
         storage.write_snapshot(snapshot_id.clone(), snapshot).await?;
-        update_branch(&storage, "main", snapshot_id.clone(), None, true).await?;
-        Repository::store_config(&storage, &RepositoryConfig::default(), None).await?;
+        update_branch(storage.as_ref(), "main", snapshot_id.clone(), None, true).await?;
+        Repository::store_config(storage.as_ref(), &RepositoryConfig::default(), None)
+            .await?;
 
-        let repo = Repository::open(None, Arc::new(storage), HashMap::new()).await?;
+        let repo = Repository::open(None, storage, HashMap::new()).await?;
         let mut ds = repo.writable_session("main").await?;
 
         // retrieve the old array node
@@ -1442,8 +1549,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_repository_with_updates_and_writes() -> Result<(), Box<dyn Error>> {
-        let backend: Arc<dyn Storage + Send + Sync> =
-            Arc::new(ObjectStorage::new_in_memory_store(Some("prefix".into()))?);
+        let backend: Arc<dyn Storage + Send + Sync> = new_in_memory_storage()?;
 
         let logging = Arc::new(LoggingStorage::new(Arc::clone(&backend)));
         let logging_c: Arc<dyn Storage + Send + Sync> = logging.clone();
@@ -1703,12 +1809,25 @@ mod tests {
         let repository = create_memory_store_repository().await;
         let mut ds = repository.writable_session("main").await?;
         ds.add_group(Path::root()).await?;
+        ds.commit("initialize", None).await?;
+
+        let mut ds = repository.writable_session("main").await?;
         ds.add_group("/a".try_into().unwrap()).await?;
         ds.add_group("/b".try_into().unwrap()).await?;
         ds.add_group("/b/bb".try_into().unwrap()).await?;
+
         ds.delete_group("/b".try_into().unwrap()).await?;
         assert!(ds.get_group(&"/b".try_into().unwrap()).await.is_err());
         assert!(ds.get_group(&"/b/bb".try_into().unwrap()).await.is_err());
+
+        ds.delete_group("/a".try_into().unwrap()).await?;
+        assert!(ds.change_set.is_empty());
+
+        // try deleting the child group again, since this was a group that was already
+        // deleted, it should be a no-op
+        ds.delete_group("/b/bb".try_into().unwrap()).await?;
+        ds.delete_group("/a".try_into().unwrap()).await?;
+        assert!(ds.change_set.is_empty());
         Ok(())
     }
 
@@ -1731,8 +1850,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_all_chunks_iterator() -> Result<(), Box<dyn Error>> {
-        let storage: Arc<dyn Storage + Send + Sync> =
-            Arc::new(ObjectStorage::new_in_memory_store(Some("prefix".into()))?);
+        let storage: Arc<dyn Storage + Send + Sync> = new_in_memory_storage()?;
         let repo = Repository::create(None, storage, HashMap::new()).await?;
         let mut ds = repo.writable_session("main").await?;
 
@@ -1808,8 +1926,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_manifests_shrink() -> Result<(), Box<dyn Error>> {
-        let in_mem_storage =
-            Arc::new(ObjectStorage::new_in_memory_store(Some("prefix".into()))?);
+        let in_mem_storage = Arc::new(ObjectStorage::new_in_memory()?);
         let storage: Arc<dyn Storage + Send + Sync> = in_mem_storage.clone();
         let repo = Repository::create(None, Arc::clone(&storage), HashMap::new()).await?;
 
@@ -1902,7 +2019,7 @@ mod tests {
         )
         .await?;
 
-        ds.commit("commit", None).await?;
+        let snap_id = ds.commit("commit", None).await?;
 
         // there should be one manifest now
         assert_eq!(
@@ -1921,12 +2038,12 @@ mod tests {
             }
             NodeData::Group => panic!("must be an array"),
         };
-        let manifest = storage.fetch_manifests(&manifest_id).await?;
+        let manifest = fetch_manifest(&manifest_id, &snap_id, storage.as_ref()).await?;
         let initial_size = manifest.len();
 
         let mut ds = repo.writable_session("main").await?;
         ds.delete_array(a2path).await?;
-        ds.commit("array2 deleted", None).await?;
+        let snap_id = ds.commit("array2 deleted", None).await?;
 
         // there should be two manifests
         assert_eq!(
@@ -1945,7 +2062,7 @@ mod tests {
             }
             NodeData::Group => panic!("must be an array"),
         };
-        let manifest = storage.fetch_manifests(&manifest_id).await?;
+        let manifest = fetch_manifest(&manifest_id, &snap_id, storage.as_ref()).await?;
         let size_after_delete = manifest.len();
 
         assert!(size_after_delete < initial_size);
@@ -1953,7 +2070,7 @@ mod tests {
         // delete a chunk
         let mut ds = repo.writable_session("main").await?;
         ds.set_chunk_ref(a1path.clone(), ChunkIndices(vec![0, 0]), None).await?;
-        ds.commit("chunk deleted", None).await?;
+        let snap_id = ds.commit("chunk deleted", None).await?;
 
         // there should be three manifests
         assert_eq!(
@@ -1982,7 +2099,7 @@ mod tests {
             }
             NodeData::Group => panic!("must be an array"),
         };
-        let manifest = storage.fetch_manifests(&manifest_id).await?;
+        let manifest = fetch_manifest(&manifest_id, &snap_id, storage.as_ref()).await?;
         let size_after_chunk_delete = manifest.len();
         assert!(size_after_chunk_delete < size_after_delete);
 
@@ -2123,8 +2240,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_setting_w_invalid_coords() -> Result<(), Box<dyn Error>> {
-        let in_mem_storage =
-            Arc::new(ObjectStorage::new_in_memory_store(Some("prefix".into()))?);
+        let in_mem_storage = new_in_memory_storage()?;
         let storage: Arc<dyn Storage + Send + Sync> = in_mem_storage.clone();
         let repo = Repository::create(None, Arc::clone(&storage), HashMap::new()).await?;
         let mut ds = repo.writable_session("main").await?;

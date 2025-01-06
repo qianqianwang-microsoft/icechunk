@@ -1,8 +1,8 @@
 use std::{collections::HashSet, future::Future, sync::Arc};
 
 use bytes::Bytes;
-use chrono::Utc;
 use icechunk::{
+    config::{S3Credentials, S3Options, S3StaticCredentials},
     format::{
         manifest::Manifest, snapshot::Snapshot, ByteRange, ChunkId, ManifestId,
         SnapshotId,
@@ -11,38 +11,69 @@ use icechunk::{
         create_tag, fetch_branch_tip, fetch_tag, list_refs, update_branch, Ref, RefError,
     },
     storage::{
-        object_store::AzureBlobStoreConfig,
-        s3::{S3ClientOptions, S3Config, S3Credentials, S3Storage, StaticS3Credentials},
+        new_in_memory_storage, new_s3_storage, object_store::{AzureBlobStoreConfig, ObjectStorageConfig},
         StorageResult,
     },
-    ObjectStorage, Storage, StorageError,
+    ObjectStorage, Repository, Storage, StorageError,
 };
 use pretty_assertions::{assert_eq, assert_ne};
 
-async fn mk_storage() -> StorageResult<S3Storage> {
-    S3Storage::new_s3_store(&S3Config {
-        bucket: "testbucket".to_string(),
-        prefix: "test_s3_storage__".to_string() + Utc::now().to_rfc3339().as_str(),
-        options: Some(S3ClientOptions {
+#[allow(clippy::expect_used)]
+async fn mk_s3_storage(prefix: &str) -> StorageResult<Arc<dyn Storage + Send + Sync>> {
+    let storage: Arc<dyn Storage + Send + Sync> = new_s3_storage(
+        S3Options {
             region: Some("us-east-1".to_string()),
-            endpoint: Some("http://localhost:9000".to_string()),
-            credentials: S3Credentials::Static(StaticS3Credentials {
-                access_key_id: "minio123".into(),
-                secret_access_key: "minio123".into(),
-                session_token: None,
-            }),
+            endpoint_url: Some("http://localhost:9000".to_string()),
             allow_http: true,
-        }),
-    })
-    .await
+            anonymous: false,
+        },
+        "testbucket".to_string(),
+        Some(prefix.to_string()),
+        Some(S3Credentials::Static(S3StaticCredentials {
+            access_key_id: "minio123".into(),
+            secret_access_key: "minio123".into(),
+            session_token: None,
+            expires_after: None,
+        })),
+        None,
+        None,
+    )
+    .expect("Creating minio storage failed");
+
+    Ok(Repository::add_in_mem_asset_caching(storage))
 }
 
-fn mk_in_memory_storage() -> ObjectStorage {
-    #![allow(clippy::unwrap_used)]
-    ObjectStorage::new_in_memory_store(Some("prefix".to_string())).unwrap()
+#[allow(clippy::expect_used)]
+async fn mk_s3_object_store_storage(
+    prefix: &str,
+) -> StorageResult<Arc<dyn Storage + Send + Sync>> {
+    // Add 2 so prefix does not match native s3 storage tests
+    let url = format!("s3://testbucket/{}2", prefix);
+    let config = ObjectStorageConfig {
+        url,
+        prefix: "".to_string(),
+        max_concurrent_requests_for_object: 12,
+        min_concurrent_request_size: 8_000_000,
+        options: vec![
+            ("aws_access_key_id".to_string(), "minio123".to_string()),
+            ("aws_secret_access_key".to_string(), "minio123".to_string()),
+            ("aws_region".to_string(), "us-east-1".to_string()),
+            ("aws_endpoint".to_string(), "http://localhost:9000".to_string()),
+            ("allow_http".to_string(), "true".to_string()),
+            ("conditional_put".to_string(), "etag".to_string()),
+        ],
+    };
+    let storage: Arc<dyn Storage + Send + Sync> = Arc::new(
+        ObjectStorage::from_config(config)
+            .expect("Creating minio s3 storage with object_store failed"),
+    );
+
+    Ok(Repository::add_in_mem_asset_caching(storage))
 }
 
-async fn mk_azure_blob_storage() -> StorageResult<ObjectStorage> {
+async fn mk_azure_blob_storage(
+    prefix: &str,
+) -> StorageResult<ObjectStorage> {
     let azure_config = AzureBlobStoreConfig {
         from_env: false,
         container: "testcontainer".to_string(),
@@ -52,7 +83,7 @@ async fn mk_azure_blob_storage() -> StorageResult<ObjectStorage> {
         ],
     };
     ObjectStorage::new_azure_blob_store(
-        "test_blob_storage__".to_string() + Utc::now().to_rfc3339().as_str(),
+        prefix.to_string(),
         azure_config,
     )
     .await
@@ -63,12 +94,16 @@ where
     F: Fn(Arc<dyn Storage + Send + Sync>) -> Fut,
     Fut: Future<Output = Result<(), Box<dyn std::error::Error>>>,
 {
-    let s1 = Arc::new(mk_storage().await?);
-    let s2 = Arc::new(mk_in_memory_storage());
-    let s3 = Arc::new(mk_azure_blob_storage().await?);
+    let prefix = format!("{:?}", ChunkId::random());
+    let s1 = mk_s3_storage(prefix.as_str()).await?;
+    #[allow(clippy::unwrap_used)]
+    let s2 = new_in_memory_storage().unwrap();
+    let s3 = mk_s3_object_store_storage(prefix.as_str()).await?;
+    let s4 = Arc::new(mk_azure_blob_storage(prefix.as_str()).await?);
     f(s1).await?;
     f(s2).await?;
     f(s3).await?;
+    f(s4).await?;
     Ok(())
 }
 
@@ -91,8 +126,8 @@ pub async fn test_manifest_write_read() -> Result<(), Box<dyn std::error::Error>
     with_storage(|storage| async move {
         let id = ManifestId::random();
         let manifest = Arc::new(Manifest::default());
-        storage.write_manifests(id.clone(), manifest.clone()).await?;
-        let back = storage.fetch_manifests(&id).await?;
+        let size = storage.write_manifests(id.clone(), manifest.clone()).await?;
+        let back = storage.fetch_manifests(&id, size).await?;
         assert_eq!(manifest, back);
         Ok(())
     })
@@ -307,7 +342,8 @@ pub async fn test_write_config_on_existing() -> Result<(), Box<dyn std::error::E
 pub async fn test_write_config_fails_on_bad_etag_when_non_existing(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // FIXME: this test fails in MiniIO but seems to work on S3
-    let storage = mk_in_memory_storage();
+    #[allow(clippy::unwrap_used)]
+    let storage = new_in_memory_storage().unwrap();
     let etag = storage
         .update_config(
             Bytes::copy_from_slice(b"hello"),

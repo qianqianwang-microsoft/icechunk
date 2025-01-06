@@ -7,9 +7,9 @@ use crate::{
     private,
 };
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::{
-    stream::{self, BoxStream},
+    stream::{self, BoxStream, FuturesOrdered},
     StreamExt, TryStreamExt,
 };
 use object_store::{
@@ -33,8 +33,9 @@ use std::{
 use url::Url;
 
 use super::{
-    ETag, ListInfo, Storage, StorageError, StorageResult, CHUNK_PREFIX, CONFIG_PATH,
-    MANIFEST_PREFIX, REF_PREFIX, SNAPSHOT_PREFIX, TRANSACTION_PREFIX,
+    split_in_multiple_requests, ETag, ListInfo, Storage, StorageError, StorageResult,
+    CHUNK_PREFIX, CONFIG_PATH, MANIFEST_PREFIX, REF_PREFIX, SNAPSHOT_PREFIX,
+    TRANSACTION_PREFIX,
 };
 
 // Get Range is object_store specific, keep it with this module
@@ -53,9 +54,11 @@ impl From<&ByteRange> for Option<GetRange> {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObjectStorageConfig {
-    url: String,
-    prefix: String,
-    options: Vec<(String, String)>,
+    pub url: String,
+    pub prefix: String,
+    pub max_concurrent_requests_for_object: u16,
+    pub min_concurrent_request_size: u64,
+    pub options: Vec<(String, String)>,
 }
 
 #[derive(Debug, Serialize)]
@@ -105,56 +108,64 @@ impl ObjectStorage {
     /// Create an in memory Storage implementation
     ///
     /// This implementation should not be used in production code.
-    pub fn new_in_memory_store(
-        prefix: Option<String>,
-    ) -> Result<ObjectStorage, StorageError> {
-        #[allow(clippy::expect_used)]
-        let prefix =
-            prefix.or(Some("".to_string())).expect("bad prefix but this should not fail");
-
-        let url = format!("memory:/{prefix}");
-        Self::from_url(&url, vec![])
+    pub fn new_in_memory() -> Result<ObjectStorage, StorageError> {
+        let url = "memory:/".to_string();
+        let config = ObjectStorageConfig {
+            url,
+            prefix: "".to_string(),
+            max_concurrent_requests_for_object: 1,
+            min_concurrent_request_size: 1,
+            options: vec![],
+        };
+        Self::from_config(config)
     }
 
     /// Create an local filesystem Storage implementation
     ///
     /// This implementation should not be used in production code.
-    pub fn new_local_store(prefix: &StdPath) -> Result<ObjectStorage, StorageError> {
+    pub fn new_local_filesystem(prefix: &StdPath) -> Result<ObjectStorage, StorageError> {
         create_dir_all(prefix).map_err(|e| StorageError::Other(e.to_string()))?;
-        let prefix = prefix.display().to_string();
+
+        let prefix = std::fs::canonicalize(prefix)
+            .map_err(|e| StorageError::Other(e.to_string()))?;
+        let prefix =
+            prefix.into_os_string().into_string().map_err(StorageError::BadPrefix)?;
         let url = format!("file://{prefix}");
-        Self::from_url(&url, vec![])
+        let config = ObjectStorageConfig {
+            url,
+            prefix,
+            max_concurrent_requests_for_object: 3,
+            min_concurrent_request_size: 1,
+            options: vec![],
+        };
+        Self::from_config(config)
     }
 
     pub async fn new_azure_blob_store(
         prefix: String,
         config: AzureBlobStoreConfig,
     ) -> Result<ObjectStorage, StorageError> {
-        let builder = config.to_builder();
-        let store =
-            Arc::new(builder.build().map_err(|e| StorageError::Other(e.to_string()))?);
-
         let options = config
             .options
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect::<Vec<(String, String)>>();
-        Ok(ObjectStorage {
-            store,
-            config: ObjectStorageConfig {
-                url: format!("azure://{}/{}", config.container, prefix),
-                prefix: prefix.to_string(),
-                options,
-            },
-        })
+        let object_store_config = ObjectStorageConfig {
+            url: format!("azure://{}/{}", config.container, prefix),
+            prefix: prefix.to_string(),
+            max_concurrent_requests_for_object: 3,
+            min_concurrent_request_size: 1,
+            options,
+        };
+        Self::from_config(object_store_config)
     }
 
     /// Create an ObjectStore client from a URL and provided options
-    pub fn from_url(
-        url: &str,
-        options: Vec<(String, String)>,
+    pub fn from_config(
+        config: ObjectStorageConfig,
     ) -> Result<ObjectStorage, StorageError> {
-        let url: Url = Url::parse(url).map_err(|e| StorageError::Other(e.to_string()))?;
+        let url: Url = Url::parse(config.url.as_str())
+            .map_err(|e| StorageError::Other(e.to_string()))?;
         if url.scheme() == "file" {
             let path = url.path();
             let store = Arc::new(LocalFileSystem::new_with_prefix(path)?);
@@ -163,12 +174,15 @@ impl ObjectStorage {
                 config: ObjectStorageConfig {
                     url: url.to_string(),
                     prefix: "".to_string(),
-                    options,
+                    options: config.options,
+                    max_concurrent_requests_for_object: config
+                        .max_concurrent_requests_for_object,
+                    min_concurrent_request_size: config.min_concurrent_request_size,
                 },
             });
         }
 
-        let (store, path) = parse_url_opts(&url, options.clone())
+        let (store, path) = parse_url_opts(&url, config.options.clone())
             .map_err(|e| StorageError::Other(e.to_string()))?;
         let store: Arc<dyn ObjectStore> = Arc::from(store);
         Ok(ObjectStorage {
@@ -176,7 +190,10 @@ impl ObjectStorage {
             config: ObjectStorageConfig {
                 url: url.to_string(),
                 prefix: path.to_string(),
-                options,
+                options: config.options,
+                max_concurrent_requests_for_object: config
+                    .max_concurrent_requests_for_object,
+                min_concurrent_request_size: config.min_concurrent_request_size,
             },
         })
     }
@@ -280,6 +297,35 @@ impl ObjectStorage {
         // FIXME: flag errors instead of skipping them
         Ok(results.filter(|res| ready(res.is_ok())).count().await)
     }
+
+    async fn get_object_concurrently(
+        &self,
+        path: &ObjectPath,
+        size: u64,
+    ) -> StorageResult<Bytes> {
+        let mut results = split_in_multiple_requests(
+            size,
+            self.config.min_concurrent_request_size,
+            self.config.max_concurrent_requests_for_object,
+        )
+        .map(|(req_offset, req_size)| async move {
+            let store = Arc::clone(&self.store);
+            let range = Some(GetRange::from(
+                req_offset as usize..req_offset as usize + req_size as usize,
+            ));
+            let opts = GetOptions { range, ..Default::default() };
+            let path = path.clone();
+            store.get_opts(&path, opts).await
+        })
+        .collect::<FuturesOrdered<_>>();
+
+        let mut res = BytesMut::with_capacity(size as usize);
+        while let Some(result) = results.try_next().await? {
+            res.extend_from_slice(result.bytes().await?.as_ref());
+        }
+
+        Ok(res.into())
+    }
 }
 
 impl private::Sealed for ObjectStorage {}
@@ -290,8 +336,7 @@ impl<'de> serde::Deserialize<'de> for ObjectStorage {
         D: serde::Deserializer<'de>,
     {
         let config = ObjectStorageConfig::deserialize(deserializer)?;
-        ObjectStorage::from_url(&config.url, config.options)
-            .map_err(serde::de::Error::custom)
+        ObjectStorage::from_config(config).map_err(serde::de::Error::custom)
     }
 }
 
@@ -372,9 +417,10 @@ impl Storage for ObjectStorage {
     async fn fetch_manifests(
         &self,
         id: &ManifestId,
+        size: u64,
     ) -> Result<Arc<Manifest>, StorageError> {
         let path = self.get_manifest_path(id);
-        let bytes = self.store.get(&path).await?.bytes().await?;
+        let bytes = self.get_object_concurrently(&path, size).await?;
         // TODO: optimize using from_read
         let res = rmp_serde::from_slice(bytes.as_ref())?;
         Ok(Arc::new(res))
@@ -436,7 +482,7 @@ impl Storage for ObjectStorage {
         &self,
         id: ManifestId,
         manifest: Arc<Manifest>,
-    ) -> Result<(), StorageError> {
+    ) -> Result<u64, StorageError> {
         let path = self.get_manifest_path(&id);
         let bytes = rmp_serde::to_vec(manifest.as_ref())?;
         let attributes = if self.supports_metadata() {
@@ -460,9 +506,10 @@ impl Storage for ObjectStorage {
             Attributes::new()
         };
         let options = PutOptions { attributes, ..PutOptions::default() };
+        let len = bytes.len() as u64;
         // FIXME: use multipart
         self.store.put_opts(&path, bytes.into(), options).await?;
-        Ok(())
+        Ok(len)
     }
 
     async fn write_transaction_log(
@@ -640,6 +687,8 @@ fn object_to_list_info(object: &ObjectMeta) -> Option<ListInfo<String>> {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
+    use std::path::PathBuf;
+
     use tempfile::TempDir;
 
     use super::{AzureBlobStoreConfig, ObjectStorage};
@@ -647,20 +696,54 @@ mod tests {
     #[test]
     fn test_serialize_object_store() {
         let tmp_dir = TempDir::new().unwrap();
-        let store = ObjectStorage::new_local_store(tmp_dir.path()).unwrap();
+        let store = ObjectStorage::new_local_filesystem(tmp_dir.path()).unwrap();
 
         let serialized = serde_json::to_string(&store).unwrap();
 
         assert_eq!(
             serialized,
             format!(
-                r#"{{"url":"file://{}","prefix":"","options":[]}}"#,
-                tmp_dir.path().display()
+                r#"{{"url":"file://{}","prefix":"","max_concurrent_requests_for_object":3,"min_concurrent_request_size":1,"options":[]}}"#,
+                std::fs::canonicalize(tmp_dir.path()).unwrap().to_str().unwrap()
             )
         );
 
         let deserialized: ObjectStorage = serde_json::from_str(&serialized).unwrap();
         assert_eq!(store.config, deserialized.config);
+    }
+
+    struct TestLocalPath(String);
+
+    impl From<&TestLocalPath> for std::path::PathBuf {
+        fn from(path: &TestLocalPath) -> Self {
+            std::path::PathBuf::from(&path.0)
+        }
+    }
+
+    impl Drop for TestLocalPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_canonicalize_path() {
+        // Absolute path
+        let tmp_dir = TempDir::new().unwrap();
+        let store = ObjectStorage::new_local_filesystem(tmp_dir.path());
+        assert!(store.is_ok());
+
+        // Relative path
+        let rel_path = "relative/path";
+        let store =
+            ObjectStorage::new_local_filesystem(PathBuf::from(&rel_path).as_path());
+        assert!(store.is_ok());
+
+        // Relative with leading ./
+        let rel_path = TestLocalPath("./other/path".to_string());
+        let store =
+            ObjectStorage::new_local_filesystem(PathBuf::from(&rel_path).as_path());
+        assert!(store.is_ok());
     }
 
     #[tokio::test]
@@ -683,7 +766,7 @@ mod tests {
 
         assert_eq!(
             serialized,
-            r#"{"url":"azure://container/icechunk","prefix":"icechunk","options":[["account_name","devstoreaccount1"],["use_emulator","true"]]}"#
+            r#"{"url":"azure://container/icechunk","prefix":"icechunk","max_concurrent_requests_for_object":3,"min_concurrent_request_size":1,"options":[["account_name","devstoreaccount1"],["use_emulator","true"]]}"#
         );
 
         let deserialized: ObjectStorage = serde_json::from_str(&serialized).unwrap();
