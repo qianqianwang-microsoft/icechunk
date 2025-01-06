@@ -13,7 +13,7 @@ use futures::{
     StreamExt, TryStreamExt,
 };
 use object_store::{
-    azure::MicrosoftAzureBuilder, local::LocalFileSystem, parse_url_opts,
+    local::LocalFileSystem, parse_url_opts,
     path::Path as ObjectPath, Attribute, AttributeValue, Attributes, GetOptions,
     GetRange, ObjectMeta, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion,
 };
@@ -24,7 +24,6 @@ use std::{
     future::ready,
     ops::Range,
     path::Path as StdPath,
-    str::FromStr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -79,29 +78,8 @@ pub enum AzureBlobCredential {
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub struct AzureBlobStoreConfig {
-    pub from_env: bool,
     pub container: String,
     pub options: Vec<(String, String)>,
-}
-
-impl AzureBlobStoreConfig {
-    pub fn to_builder(&self) -> MicrosoftAzureBuilder {
-        let mut builder = if self.from_env {
-            MicrosoftAzureBuilder::from_env()
-        } else {
-            MicrosoftAzureBuilder::new()
-        };
-
-        for (k, v) in self.options.iter() {
-            #[allow(clippy::expect_used)]
-            let config_key = object_store::azure::AzureConfigKey::from_str(k)
-                .expect("Unexpected Azure config key");
-
-            builder = builder.with_config(config_key, v);
-        }
-
-        builder.with_container_name(self.container.clone())
-    }
 }
 
 impl ObjectStorage {
@@ -143,15 +121,11 @@ impl ObjectStorage {
 
     pub async fn new_azure_blob_store(
         prefix: String,
-        config: AzureBlobStoreConfig,
+        container: String,
+        options: Vec<(String, String)>,
     ) -> Result<ObjectStorage, StorageError> {
-        let options = config
-            .options
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<Vec<(String, String)>>();
         let object_store_config = ObjectStorageConfig {
-            url: format!("azure://{}/{}", config.container, prefix),
+            url: format!("azure://{}/{}", container, prefix),
             prefix: prefix.to_string(),
             max_concurrent_requests_for_object: 3,
             min_concurrent_request_size: 1,
@@ -691,7 +665,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{AzureBlobStoreConfig, ObjectStorage};
+    use super::ObjectStorage;
 
     #[test]
     fn test_serialize_object_store() {
@@ -753,12 +727,7 @@ mod tests {
             ("use_emulator".to_string(), true.to_string()),
         ]);
 
-        let config = AzureBlobStoreConfig {
-            from_env: false,
-            container: "container".to_string(),
-            options,
-        };
-        let store = ObjectStorage::new_azure_blob_store("icechunk".to_string(), config)
+        let store = ObjectStorage::new_azure_blob_store("icechunk".to_string(), "container".to_string(), options)
             .await
             .unwrap();
 
