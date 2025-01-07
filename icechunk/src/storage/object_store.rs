@@ -5,9 +5,10 @@ use crate::{
         ChunkId, FileTypeTag, ManifestId, ObjectId, SnapshotId,
     },
     private,
+    storage::CompressionAlgorithm,
 };
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures::{
     stream::{self, BoxStream, FuturesOrdered},
     StreamExt, TryStreamExt,
@@ -22,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::create_dir_all,
     future::ready,
+    num::{NonZeroU16, NonZeroU64},
     ops::Range,
     path::Path as StdPath,
     sync::{
@@ -29,12 +31,14 @@ use std::{
         Arc,
     },
 };
+use tokio::io::AsyncRead;
+use tokio_util::{compat::FuturesAsyncReadCompatExt, io::SyncIoBridge};
 use url::Url;
 
 use super::{
-    split_in_multiple_requests, ETag, ListInfo, Storage, StorageError, StorageResult,
-    CHUNK_PREFIX, CONFIG_PATH, MANIFEST_PREFIX, REF_PREFIX, SNAPSHOT_PREFIX,
-    TRANSACTION_PREFIX,
+    split_in_multiple_requests, ConcurrencySettings, ETag, ListInfo, Settings, Storage,
+    StorageError, StorageResult, CHUNK_PREFIX, CONFIG_PATH, MANIFEST_PREFIX, REF_PREFIX,
+    SNAPSHOT_PREFIX, TRANSACTION_PREFIX,
 };
 
 // Get Range is object_store specific, keep it with this module
@@ -55,8 +59,6 @@ impl From<&ByteRange> for Option<GetRange> {
 pub struct ObjectStorageConfig {
     pub url: String,
     pub prefix: String,
-    pub max_concurrent_requests_for_object: u16,
-    pub min_concurrent_request_size: u64,
     pub options: Vec<(String, String)>,
 }
 
@@ -88,13 +90,7 @@ impl ObjectStorage {
     /// This implementation should not be used in production code.
     pub fn new_in_memory() -> Result<ObjectStorage, StorageError> {
         let url = "memory:/".to_string();
-        let config = ObjectStorageConfig {
-            url,
-            prefix: "".to_string(),
-            max_concurrent_requests_for_object: 1,
-            min_concurrent_request_size: 1,
-            options: vec![],
-        };
+        let config = ObjectStorageConfig { url, prefix: "".to_string(), options: vec![] };
         Self::from_config(config)
     }
 
@@ -109,13 +105,7 @@ impl ObjectStorage {
         let prefix =
             prefix.into_os_string().into_string().map_err(StorageError::BadPrefix)?;
         let url = format!("file://{prefix}");
-        let config = ObjectStorageConfig {
-            url,
-            prefix,
-            max_concurrent_requests_for_object: 3,
-            min_concurrent_request_size: 1,
-            options: vec![],
-        };
+        let config = ObjectStorageConfig { url, prefix, options: vec![] };
         Self::from_config(config)
     }
 
@@ -127,8 +117,6 @@ impl ObjectStorage {
         let object_store_config = ObjectStorageConfig {
             url: format!("azure://{}/{}", container, prefix),
             prefix: prefix.to_string(),
-            max_concurrent_requests_for_object: 3,
-            min_concurrent_request_size: 1,
             options,
         };
         Self::from_config(object_store_config)
@@ -149,9 +137,6 @@ impl ObjectStorage {
                     url: url.to_string(),
                     prefix: "".to_string(),
                     options: config.options,
-                    max_concurrent_requests_for_object: config
-                        .max_concurrent_requests_for_object,
-                    min_concurrent_request_size: config.min_concurrent_request_size,
                 },
             });
         }
@@ -165,9 +150,6 @@ impl ObjectStorage {
                 url: url.to_string(),
                 prefix: path.to_string(),
                 options: config.options,
-                max_concurrent_requests_for_object: config
-                    .max_concurrent_requests_for_object,
-                min_concurrent_request_size: config.min_concurrent_request_size,
             },
         })
     }
@@ -273,13 +255,14 @@ impl ObjectStorage {
 
     async fn get_object_concurrently(
         &self,
+        settings: &Settings,
         path: &ObjectPath,
         size: u64,
-    ) -> StorageResult<Bytes> {
+    ) -> StorageResult<impl AsyncRead> {
         let mut results = split_in_multiple_requests(
             size,
-            self.config.min_concurrent_request_size,
-            self.config.max_concurrent_requests_for_object,
+            settings.concurrency.min_concurrent_request_size.get(),
+            settings.concurrency.max_concurrent_requests_for_object.get(),
         )
         .map(|(req_offset, req_size)| async move {
             let store = Arc::clone(&self.store);
@@ -292,12 +275,12 @@ impl ObjectStorage {
         })
         .collect::<FuturesOrdered<_>>();
 
-        let mut res = BytesMut::with_capacity(size as usize);
+        let mut res = stream::empty().boxed();
         while let Some(result) = results.try_next().await? {
-            res.extend_from_slice(result.bytes().await?.as_ref());
+            res = res.chain(result.into_stream()).boxed();
         }
 
-        Ok(res.into())
+        Ok(res.err_into().into_async_read().compat())
     }
 }
 
@@ -316,7 +299,39 @@ impl<'de> serde::Deserialize<'de> for ObjectStorage {
 #[async_trait]
 #[typetag::serde]
 impl Storage for ObjectStorage {
-    async fn fetch_config(&self) -> StorageResult<Option<(Bytes, ETag)>> {
+    fn default_settings(&self) -> Settings {
+        let base = Settings::default();
+        let url = Url::parse(self.config.url.as_str());
+        let scheme = url.as_ref().map(|url| url.scheme()).unwrap_or("s3");
+        match scheme {
+            "file" => Settings {
+                concurrency: ConcurrencySettings {
+                    max_concurrent_requests_for_object: NonZeroU16::new(5)
+                        .unwrap_or(NonZeroU16::MIN),
+                    min_concurrent_request_size: NonZeroU64::new(4 * 1024)
+                        .unwrap_or(NonZeroU64::MIN),
+                },
+                ..base
+            },
+            "memory" => Settings {
+                concurrency: ConcurrencySettings {
+                    // we do != 1 because we use this store for tests
+                    max_concurrent_requests_for_object: NonZeroU16::new(5)
+                        .unwrap_or(NonZeroU16::MIN),
+                    min_concurrent_request_size: NonZeroU64::new(1)
+                        .unwrap_or(NonZeroU64::MIN),
+                },
+                ..base
+            },
+
+            _ => base,
+        }
+    }
+
+    async fn fetch_config(
+        &self,
+        _settings: &Settings,
+    ) -> StorageResult<Option<(Bytes, ETag)>> {
         let path = self.get_config_path();
         let response = self.store.get(&path).await;
 
@@ -331,6 +346,7 @@ impl Storage for ObjectStorage {
     }
     async fn update_config(
         &self,
+        _settings: &Settings,
         config: Bytes,
         etag: Option<&str>,
     ) -> StorageResult<ETag> {
@@ -371,6 +387,7 @@ impl Storage for ObjectStorage {
 
     async fn fetch_snapshot(
         &self,
+        _settings: &Settings,
         id: &SnapshotId,
     ) -> Result<Arc<Snapshot>, StorageError> {
         let path = self.get_snapshot_path(id);
@@ -382,6 +399,7 @@ impl Storage for ObjectStorage {
 
     async fn fetch_attributes(
         &self,
+        _settings: &Settings,
         _id: &AttributesId,
     ) -> Result<Arc<AttributesTable>, StorageError> {
         todo!();
@@ -389,18 +407,24 @@ impl Storage for ObjectStorage {
 
     async fn fetch_manifests(
         &self,
+        settings: &Settings,
         id: &ManifestId,
         size: u64,
     ) -> Result<Arc<Manifest>, StorageError> {
         let path = self.get_manifest_path(id);
-        let bytes = self.get_object_concurrently(&path, size).await?;
-        // TODO: optimize using from_read
-        let res = rmp_serde::from_slice(bytes.as_ref())?;
-        Ok(Arc::new(res))
+        let object_read = self.get_object_concurrently(settings, &path, size).await?;
+        let manifest = tokio::task::spawn_blocking(move || {
+            let sync_read = SyncIoBridge::new(object_read);
+            let decompressor = zstd::stream::Decoder::new(sync_read)?;
+            rmp_serde::from_read(decompressor).map_err(StorageError::MsgPackDecodeError)
+        })
+        .await??;
+        Ok(Arc::new(manifest))
     }
 
     async fn fetch_transaction_log(
         &self,
+        _settings: &Settings,
         id: &SnapshotId,
     ) -> StorageResult<Arc<TransactionLog>> {
         let path = self.get_transaction_path(id);
@@ -412,6 +436,7 @@ impl Storage for ObjectStorage {
 
     async fn write_snapshot(
         &self,
+        _settings: &Settings,
         id: SnapshotId,
         snapshot: Arc<Snapshot>,
     ) -> Result<(), StorageError> {
@@ -453,6 +478,7 @@ impl Storage for ObjectStorage {
 
     async fn write_attributes(
         &self,
+        _settings: &Settings,
         _id: AttributesId,
         _table: Arc<AttributesTable>,
     ) -> Result<(), StorageError> {
@@ -461,11 +487,23 @@ impl Storage for ObjectStorage {
 
     async fn write_manifests(
         &self,
+        settings: &Settings,
         id: ManifestId,
         manifest: Arc<Manifest>,
     ) -> Result<u64, StorageError> {
         let path = self.get_manifest_path(&id);
-        let bytes = rmp_serde::to_vec(manifest.as_ref())?;
+        let manifest_c = Arc::clone(&manifest);
+        debug_assert_eq!(settings.compression.algorithm, CompressionAlgorithm::Zstd);
+        let compression_level = settings.compression.level as i32;
+        let buffer = tokio::task::spawn_blocking(move || {
+            let buffer = Vec::new(); // TODO: initialize capacity
+            let mut compressor = zstd::stream::Encoder::new(buffer, compression_level)?;
+            rmp_serde::encode::write(&mut compressor, manifest_c.as_ref())
+                .map_err(StorageError::MsgPackEncodeError)?;
+            compressor.finish().map_err(StorageError::IOError)
+        })
+        .await??;
+
         let manifest_version_attribute = if self.config.url.starts_with("azure") {
             let azure_manifest_version_metadata_key =
                 format_constants::LATEST_ICECHUNK_MANIFEST_VERSION_METADATA_KEY
@@ -495,14 +533,15 @@ impl Storage for ObjectStorage {
             Attributes::new()
         };
         let options = PutOptions { attributes, ..PutOptions::default() };
-        let len = bytes.len() as u64;
+        let len = buffer.len() as u64;
         // FIXME: use multipart
-        self.store.put_opts(&path, bytes.into(), options).await?;
+        self.store.put_opts(&path, buffer.into(), options).await?;
         Ok(len)
     }
 
     async fn write_transaction_log(
         &self,
+        _settings: &Settings,
         id: SnapshotId,
         log: Arc<TransactionLog>,
     ) -> StorageResult<()> {
@@ -544,6 +583,7 @@ impl Storage for ObjectStorage {
 
     async fn fetch_chunk(
         &self,
+        _settings: &Settings,
         id: &ChunkId,
         range: &ByteRange,
     ) -> Result<Bytes, StorageError> {
@@ -558,6 +598,7 @@ impl Storage for ObjectStorage {
 
     async fn write_chunk(
         &self,
+        _settings: &Settings,
         id: ChunkId,
         bytes: bytes::Bytes,
     ) -> Result<(), StorageError> {
@@ -570,7 +611,7 @@ impl Storage for ObjectStorage {
         Ok(())
     }
 
-    async fn get_ref(&self, ref_key: &str) -> StorageResult<Bytes> {
+    async fn get_ref(&self, _settings: &Settings, ref_key: &str) -> StorageResult<Bytes> {
         let key = self.ref_key(ref_key);
         match self.store.get(&key).await {
             Ok(res) => Ok(res.bytes().await?),
@@ -581,7 +622,7 @@ impl Storage for ObjectStorage {
         }
     }
 
-    async fn ref_names(&self) -> StorageResult<Vec<String>> {
+    async fn ref_names(&self, _settings: &Settings) -> StorageResult<Vec<String>> {
         // FIXME: i don't think object_store's implementation of list_with_delimiter is any good
         // we need to test if it even works beyond 1k refs
         let prefix = self.ref_key("");
@@ -600,6 +641,7 @@ impl Storage for ObjectStorage {
 
     async fn ref_versions(
         &self,
+        _settings: &Settings,
         ref_name: &str,
     ) -> StorageResult<BoxStream<StorageResult<String>>> {
         let res = self.do_ref_versions(ref_name).await;
@@ -619,6 +661,7 @@ impl Storage for ObjectStorage {
 
     async fn write_ref(
         &self,
+        _settings: &Settings,
         ref_key: &str,
         overwrite_refs: bool,
         bytes: Bytes,
@@ -641,6 +684,7 @@ impl Storage for ObjectStorage {
 
     async fn list_objects<'a>(
         &'a self,
+        _settings: &Settings,
         prefix: &str,
     ) -> StorageResult<BoxStream<'a, StorageResult<ListInfo<String>>>> {
         let prefix =
@@ -656,6 +700,7 @@ impl Storage for ObjectStorage {
 
     async fn delete_objects(
         &self,
+        _settings: &Settings,
         prefix: &str,
         ids: BoxStream<'_, String>,
     ) -> StorageResult<usize> {
@@ -700,7 +745,7 @@ mod tests {
         assert_eq!(
             serialized,
             format!(
-                r#"{{"url":"file://{}","prefix":"","max_concurrent_requests_for_object":3,"min_concurrent_request_size":1,"options":[]}}"#,
+                r#"{{"url":"file://{}","prefix":"","options":[]}}"#,
                 std::fs::canonicalize(tmp_dir.path()).unwrap().to_str().unwrap()
             )
         );
@@ -762,7 +807,7 @@ mod tests {
 
         assert_eq!(
             serialized,
-            r#"{"url":"azure://container/icechunk","prefix":"icechunk","max_concurrent_requests_for_object":3,"min_concurrent_request_size":1,"options":[["account_name","devstoreaccount1"],["use_emulator","true"]]}"#
+            r#"{"url":"azure://container/icechunk","prefix":"icechunk","options":[["account_name","devstoreaccount1"],["use_emulator","true"]]}"#
         );
 
         let deserialized: ObjectStorage = serde_json::from_str(&serialized).unwrap();
