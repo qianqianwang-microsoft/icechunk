@@ -180,8 +180,7 @@ impl ObjectStorage {
 
     /// We need this because object_store's local file implementation doesn't support metadata.
     pub fn supports_metadata(&self) -> bool {
-        !self.config.url.starts_with("file") && !self.config.url.starts_with("azure")
-        // temporarily disable metadata for azure because azure metadata doesn't allow "-"s
+        !self.config.url.starts_with("file")
     }
 
     /// Return all keys in the store
@@ -418,6 +417,16 @@ impl Storage for ObjectStorage {
     ) -> Result<(), StorageError> {
         let path = self.get_snapshot_path(&id);
         let bytes = rmp_serde::to_vec(snapshot.as_ref())?;
+        let snapshot_version_attribute = if self.config.url.starts_with("azure") {
+            let azure_snapshot_version_metadata_key =
+                format_constants::LATEST_ICECHUNK_SNAPSHOT_VERSION_METADATA_KEY
+                    .replace("-", "_");
+            Attribute::Metadata(azure_snapshot_version_metadata_key.into())
+        } else {
+            Attribute::Metadata(std::borrow::Cow::Borrowed(
+                format_constants::LATEST_ICECHUNK_SNAPSHOT_VERSION_METADATA_KEY,
+            ))
+        };
         let attributes = if self.supports_metadata() {
             Attributes::from_iter(vec![
                 (
@@ -427,9 +436,7 @@ impl Storage for ObjectStorage {
                     ),
                 ),
                 (
-                    Attribute::Metadata(std::borrow::Cow::Borrowed(
-                        format_constants::LATEST_ICECHUNK_SNAPSHOT_VERSION_METADATA_KEY,
-                    )),
+                    snapshot_version_attribute,
                     AttributeValue::from(
                         snapshot.icechunk_snapshot_format_version.to_string(),
                     ),
@@ -459,6 +466,16 @@ impl Storage for ObjectStorage {
     ) -> Result<u64, StorageError> {
         let path = self.get_manifest_path(&id);
         let bytes = rmp_serde::to_vec(manifest.as_ref())?;
+        let manifest_version_attribute = if self.config.url.starts_with("azure") {
+            let azure_manifest_version_metadata_key =
+                format_constants::LATEST_ICECHUNK_MANIFEST_VERSION_METADATA_KEY
+                    .replace("-", "_");
+            Attribute::Metadata(azure_manifest_version_metadata_key.into())
+        } else {
+            Attribute::Metadata(std::borrow::Cow::Borrowed(
+                format_constants::LATEST_ICECHUNK_MANIFEST_VERSION_METADATA_KEY,
+            ))
+        };
         let attributes = if self.supports_metadata() {
             Attributes::from_iter(vec![
                 (
@@ -468,9 +485,7 @@ impl Storage for ObjectStorage {
                     ),
                 ),
                 (
-                    Attribute::Metadata(std::borrow::Cow::Borrowed(
-                        format_constants::LATEST_ICECHUNK_MANIFEST_VERSION_METADATA_KEY,
-                    )),
+                    manifest_version_attribute,
                     AttributeValue::from(
                         manifest.icechunk_manifest_format_version.to_string(),
                     ),
@@ -493,6 +508,16 @@ impl Storage for ObjectStorage {
     ) -> StorageResult<()> {
         let path = self.get_transaction_path(&id);
         let bytes = rmp_serde::to_vec(log.as_ref())?;
+        let transaction_log_version_attribute = if self.config.url.starts_with("azure") {
+            let azure_transaction_log_version_metadata_key =
+                format_constants::LATEST_ICECHUNK_TRANSACTION_LOG_VERSION_METADATA_KEY
+                    .replace("-", "_");
+            Attribute::Metadata(azure_transaction_log_version_metadata_key.into())
+        } else {
+            Attribute::Metadata(std::borrow::Cow::Borrowed(
+                format_constants::LATEST_ICECHUNK_TRANSACTION_LOG_VERSION_METADATA_KEY,
+            ))
+        };
         let attributes = if self.supports_metadata() {
             Attributes::from_iter(vec![
                 (
@@ -502,9 +527,7 @@ impl Storage for ObjectStorage {
                     ),
                 ),
                 (
-                    Attribute::Metadata(std::borrow::Cow::Borrowed(
-                        format_constants::LATEST_ICECHUNK_TRANSACTION_LOG_VERSION_METADATA_KEY,
-                    )),
+                    transaction_log_version_attribute,
                     AttributeValue::from(
                         log.icechunk_transaction_log_format_version.to_string(),
                     ),
